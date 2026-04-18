@@ -1,0 +1,24 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Java: Compile",
+      "type": "shell",
+      "command": "javac -d out src/*.java",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": [
+        "$javac"
+      ]
+    },
+    {
+      "label": "Java: Run LocalTest",
+      "type": "shell",
+      "command": "java -cp out LocalTest 2",
+      "dependsOn": "Java: Compile",
+      "problemMatcher": []
+    }
+  ]
+}
