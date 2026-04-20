@@ -50,7 +50,9 @@ public class HashID {
         return bin;
     }
 
-    public static int getNodeDistance(String homeBinaryStr, String neighborBinaryStr) {
+    public static int getNodeDistance(String homeHashedID, String neighborHashedID) {
+        String homeBinaryStr = hexToBin(homeHashedID);
+        String neighborBinaryStr = hexToBin(neighborHashedID);
         int equalCount = 0;
         
         for(int i = 0; i < homeBinaryStr.length(); i++) {
