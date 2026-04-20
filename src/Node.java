@@ -92,6 +92,7 @@ public class Node implements NodeInterface {
     String value;
     String hashedID;
     DatagramSocket socket;
+    HashSet<Node> knownNodes = new HashSet<>(); 
 
     //pq should store Node and Distance
     PriorityQueue<NodeInfo> pq = new PriorityQueue<>(
@@ -110,6 +111,10 @@ public class Node implements NodeInterface {
 
     public String getNodeHashedID() {
         return hashedID;
+    }
+
+    public HashSet<Node> getKnownNodes() {
+        return knownNodes;
     }
 
     public DatagramSocket getDatagramSocket() {
@@ -163,6 +168,11 @@ public class Node implements NodeInterface {
 
             try {
                 socket.receive(packet);
+
+                System.out.println("len=" + packet.getLength());
+                System.out.println("from=" + packet.getAddress() + ":" + packet.getPort());
+                System.out.println("raw=" + Arrays.toString(Arrays.copyOf(packet.getData(), packet.getLength())));
+
                 // parse + dispatch packet here
                 ByteBuffer bb = ByteBuffer.wrap(buf, 0, packet.getLength());
                 bb.order(ByteOrder.BIG_ENDIAN);
@@ -178,8 +188,82 @@ public class Node implements NodeInterface {
                 }
 
                 byte space = bb.get();
-                if ((b1 & 0xFF) != 0x20) {
+                if ((space & 0xFF) != 0x20) {
                     throw new Exception("Transaction ID is not followed by a space");
+                }
+
+                byte type = bb.get();
+                switch((char) type) {
+                    case 'N': {
+                        // Remaining bytes after type are UTF-8 payload
+                        String payloadIn = new String(
+                            packet.getData(),
+                            4,                              // txid(2) + space(1) + type(1)
+                            packet.getLength() - 4,
+                            java.nio.charset.StandardCharsets.UTF_8
+                        );
+
+                        // Decode requested hashID (CRN string format)
+                        String targetHashId = decodeCrnString(payloadIn);
+
+                        // Find up to 3 closest nodes to requested hash
+                        List<NodeInfo> closest = getClosestNodes(targetHashId, this.getKnownNodes());
+
+                        // Build response payload: O + pairs of (nodeName, address), each CRN-encoded
+                        StringBuilder out = new StringBuilder("O");
+                        for (NodeInfo n : closest) {
+                            out.append(encodeCrnString(n.getName()));
+                            out.append(encodeCrnString(n.getAddress()));
+                        }
+
+                        byte[] outBytes = out.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8);
+
+                        // txid + space + payload
+                        byte[] sendBuf = new byte[3 + outBytes.length];
+                        sendBuf[0] = b1;
+                        sendBuf[1] = b2;
+                        sendBuf[2] = 0x20; // space
+                        System.arraycopy(outBytes, 0, sendBuf, 3, outBytes.length);
+
+                        DatagramPacket response = new DatagramPacket(
+                            sendBuf, sendBuf.length, packet.getAddress(), packet.getPort()
+                        );
+                        socket.send(response);
+                        break;
+                    }
+                    case 'G' : {
+                        //Response: H + node name
+
+                        String payload = "H" + encodeCrnString(this.getNodeName());
+                        byte[] payloadBytes = payload.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                        byte[] sendBuf = new byte[3 + payloadBytes.length];
+
+                        sendBuf[0] = b1;
+                        sendBuf[1] = b2;
+                        sendBuf[2] = ' ';
+                        
+                        for(int i = 0; i < payloadBytes.length; i++) {
+                            sendBuf[i + 3] = payloadBytes[i];
+                        }
+
+                        DatagramPacket DpSend = new DatagramPacket(sendBuf, sendBuf.length, packet.getAddress(), packet.getPort());
+                        socket.send(DpSend);
+                        break;
+                    }
+                    case 'I' : {
+                        // Used to communicate information to the user. Nodes MAY discard these messages.
+                        break;
+                    }
+                    case 'V' : {
+                        // Type: V + node name + embedded message
+                        // A node receiving a relay MUST forward the embedded message to the named node.
+                        // If the embedded message is a request, the response MUST be returned to the original sender
+                        // using the relay transaction ID.
+                        // Relay handling MUST NOT prevent processing of other messages.
+                    }
+                    default : {
+                        System.err.println("" + type);
+                    }
                 }
 
             } catch (java.net.SocketTimeoutException e) {
@@ -266,13 +350,13 @@ public class Node implements NodeInterface {
         throw new IllegalArgumentException("Invalid CRN string: missing trailing delimiter");
     }
 
-    public List<NodeInfo> getClosestNodes(Node node, HashSet<Node> knownNodes) {
+    public List<NodeInfo> getClosestNodes(String targetHashId, HashSet<Node> knownNodes) {
         // we are emptying the PriorityQueue to start fresh and get rid of old values.
         while(!pq.isEmpty()) {pq.poll(); }
         ArrayList<NodeInfo> result = new ArrayList<>();
         
         for(Node n : knownNodes) {
-            NodeInfo currNodeInfo = new NodeInfo(n.getNodeName(), n.getNodeValue(), HashID.getNodeDistance(node.getNodeHashedID(), n.getNodeHashedID()));
+            NodeInfo currNodeInfo = new NodeInfo(n.getNodeName(), n.getNodeValue(), HashID.getNodeDistance(targetHashId, n.getNodeHashedID()));
 
             pq.add(currNodeInfo);
             if (pq.size() > 3) {
