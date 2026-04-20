@@ -29,21 +29,21 @@ class LocalTest {
 	    // If you want to test with more nodes,
 	    // set the number as a command line argument
 	    if (args.length > 0) {
-		int n = Integer.parseInt(args[0]);
-		if (n >= 2 && n <= 10) {
-		    numberOfNodes = n; 
-		} else {
-		    // If you want more than 10 nodes, you will need
-		    // to change how bootstrapping is done
-		}
+			int n = Integer.parseInt(args[0]);
+			if (n >= 2 && n <= 10) {
+				numberOfNodes = n; 
+			} else {
+				// If you want more than 10 nodes, you will need
+				// to change how bootstrapping is done
+			}
 	    }
 	
 	    // Create an array of nodes and initialise them
 	    Node [] nodes = new Node [numberOfNodes];
 	    for (int i = 0; i < numberOfNodes; ++i) {
-		nodes[i] = new Node();
-		nodes[i].setNodeName("N:test" + i);
-		nodes[i].openPort(20110 + i);
+			nodes[i] = new Node();
+			nodes[i].setNodeName("N:test" + i);
+			nodes[i].openPort(20110 + i);
 	    }
 	    
 	    // Bootstrapping so that nodes know the addresses of some of the others
@@ -52,18 +52,18 @@ class LocalTest {
 	    // Start each of the nodes running in a thread
 	    // nodes[0] is handled by this program rather than a thread
 	    for (int i = 1; i < numberOfNodes; ++i) {
-		Integer j = i;
-		Runnable r = () -> {
-		    try {
-			// These nodes just respond to messages
-			nodes[j].handleIncomingMessages(0);
-		    } catch (Exception e) {
-			System.err.println("Unhandled exception in node " + j );
-			e.printStackTrace(System.err);
-		    }
-		};
-		Thread t = new Thread(r);
-		t.start();
+			Integer j = i;
+			Runnable r = () -> {
+				try {
+				// These nodes just respond to messages
+				nodes[j].handleIncomingMessages(0);
+				} catch (Exception e) {
+				System.err.println("Unhandled exception in node " + j );
+				e.printStackTrace(System.err);
+				}
+			};
+			Thread t = new Thread(r);
+			t.start();
 	    }
 
 	    // Now we can test some of the functionality of node[0]
@@ -92,70 +92,70 @@ class LocalTest {
 	    // We will try to store them in the network.
 	    // Which node the are stored on will depend on how many nodes there are in the network.
 	    for (int i = 0; i < lines.size(); ++i) {
-		String key = "D:Juliet-" + i;
-		System.out.print("Trying to write " + key);
-		boolean success = nodes[0].write(key, lines.get(i));
-		if (success) {
-		    System.out.println(" worked!");
-		    ++successfulTests;
-		} else {
-		    System.out.println(" failed?");
-		}
+			String key = "D:Juliet-" + i;
+			System.out.print("Trying to write " + key);
+			boolean success = nodes[0].write(key, lines.get(i));
+			if (success) {
+				System.out.println(" worked!");
+				++successfulTests;
+			} else {
+				System.out.println(" failed?");
+			}
 	    }
 	    
 	    // Read them back to make sure the other node handled them correctly
 	    for (int i = 0; i < lines.size(); ++i) {
-		String key = "D:Juliet-" + i;
-		System.out.print("Trying to write " + key);
-		String value = nodes[0].read(key);
-		if (value == null) {
-		    System.out.println(" not found?");
-		} else if (value.equals(lines.get(i))) {
-		    System.out.println(" worked!");
-		    ++successfulTests;
-		} else {
-		    System.out.println(" unexpected string : " + value);
-		}
+			String key = "D:Juliet-" + i;
+			System.out.print("Trying to write " + key);
+			String value = nodes[0].read(key);
+			if (value == null) {
+				System.out.println(" not found?");
+			} else if (value.equals(lines.get(i))) {
+				System.out.println(" worked!");
+				++successfulTests;
+			} else {
+				System.out.println(" unexpected string : " + value);
+			}
 	    }
 
 	    if (successfulTests == 2*lines.size()) {
-		System.out.println("All tests worked -- that's a good start!");
+			System.out.println("All tests worked -- that's a good start!");
 	    }
 	    
 	} catch (Exception e) {
-	    System.err.println("Exception during localTest");
-	    e.printStackTrace(System.err);
-	    return;
-	}
+			System.err.println("Exception during localTest");
+			e.printStackTrace(System.err);
+			return;
+		}
     }
 
     // This sends gives each node some initial address key/value pairs
     // You don't need to know how this works
     public static void bootstrap (Node [] nodes) throws Exception {
-	int seed = 23; // Change for different initial network topologies
-	Random r = new Random(seed);
-	int n = nodes.length;
-	double p =  Math.log( (double) n+5 ) / (double)n;
+		int seed = 23; // Change for different initial network topologies
+		Random r = new Random(seed);
+		int n = nodes.length;
+		double p =  Math.log( (double) n+5 ) / (double)n;
 
-        DatagramSocket ds = new DatagramSocket(20099);
-	byte[] contents = {0x30, 0x30, 0x20, 0x57, 0x20, 0x30, 0x20, 0x4E, 0x3A, 0x74, 0x65, 0x73, 0x74, 0x21, 0x20, 0x30, 0x20, 0x31, 0x32, 0x37, 0x2E, 0x30, 0x2E, 0x30, 0x2E, 0x31, 0x3A, 0x32, 0x30, 0x31, 0x31, 0x21, 0x20 };
-	
-	for (int i = 0; i < n; ++i) {
-	    for (int j = 0; j < n; ++j) {
-		if (i == j) {
-		    // Skip
-		} else {
-		    if (r.nextDouble() <= p) {
-			contents[0x00] = (byte)(0x41 + i);
-			contents[0x01] = (byte)(0x42 + j);
-			contents[0x0D] = (byte)(0x30 + j);
-			contents[0x1F] = (byte)(0x30 + j);
-			DatagramPacket packet = new DatagramPacket(contents, contents.length, InetAddress.getLocalHost(), 20110 + i);
-			ds.send(packet);
-		    }
+			DatagramSocket ds = new DatagramSocket(20099);
+		byte[] contents = {0x30, 0x30, 0x20, 0x57, 0x20, 0x30, 0x20, 0x4E, 0x3A, 0x74, 0x65, 0x73, 0x74, 0x21, 0x20, 0x30, 0x20, 0x31, 0x32, 0x37, 0x2E, 0x30, 0x2E, 0x30, 0x2E, 0x31, 0x3A, 0x32, 0x30, 0x31, 0x31, 0x21, 0x20 };
+		
+		for (int i = 0; i < n; ++i) {
+			for (int j = 0; j < n; ++j) {
+			if (i == j) {
+				// Skip
+			} else {
+				if (r.nextDouble() <= p) {
+				contents[0x00] = (byte)(0x41 + i);
+				contents[0x01] = (byte)(0x42 + j);
+				contents[0x0D] = (byte)(0x30 + j);
+				contents[0x1F] = (byte)(0x30 + j);
+				DatagramPacket packet = new DatagramPacket(contents, contents.length, InetAddress.getLocalHost(), 20110 + i);
+				ds.send(packet);
+				}
+			}
+			}
 		}
-	    }
-	}
-	return;
+		return;
     }
 }
