@@ -2,18 +2,23 @@
 // Coursework 2024/2025
 //
 // Submission by
-//  YOUR_NAME_GOES_HERE
-//  YOUR_STUDENT_ID_NUMBER_GOES_HERE
-//  YOUR_EMAIL_GOES_HERE
+//  Student Name : Talip Tun
+//  Student Number : 240014310
+//  Student Email : Talip.Tun@city.ac.uk
 
 
 // DO NOT EDIT starts
 // This gives the interface that your code must implement.
 // These descriptions are intended to help you understand how the interface
 // will be used. See the RFC for how the protocol works.
+import java.net.DatagramPacket;
+import java.net.DatagramSocket;
+import java.net.InetAddress;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.util.*;
 
 interface NodeInterface {
-
     /* These methods configure your node.
      * They must both be called once after the node has been created but
      * before it is used. */
@@ -81,17 +86,106 @@ interface NodeInterface {
 
 // Complete this!
 public class Node implements NodeInterface {
+    static final HashMap<String, String> nodeMap = new HashMap<>();
+    boolean isAddress;
+    String key;
+    String value;
+    String hashedID;
+    DatagramSocket socket;
 
-    public void setNodeName(String nodeName) throws Exception {
-	throw new Exception("Not implemented");
+    //pq should store Node and Distance
+    PriorityQueue<NodeInfo> pq = new PriorityQueue<>(
+        3, (a, b) -> Integer.compare(b.getDistance(), a.getDistance())
+    );
+
+    public Node() {}
+
+    public String getNodeName() {
+        return key;
     }
 
+    public String getNodeValue() {
+        return value;
+    }
+
+    public String getNodeHashedID() {
+        return hashedID;
+    }
+
+    public DatagramSocket getDatagramSocket() {
+        return socket;
+    }
+
+    // A node MUST store at most three address key/value pairs for each distance.
+    // If more than three exist at the same distance, the node MUST keep only three and SHOULD
+    // prefer stable nodes.
+
+    // FOR ADDRESS KEY/VALUE PAIRS
+    public void setNodeName(String nodeName) throws Exception {
+        try {
+            if (!nodeMap.containsKey(nodeName)) {
+                nodeMap.put(nodeName, "");
+                this.key = nodeName;
+                this.hashedID = HashID.getHashedId(key);
+            } else {
+                throw new Exception("Name already exists");
+            }
+        } catch (Exception e) {
+            throw new Exception("Not implemented" + e);
+        }
+    }
+
+    // FOR ADDRESS KEY/VALUE PAIRS
     public void openPort(int portNumber) throws Exception {
-	throw new Exception("Not implemented");
+        try {
+            socket = new DatagramSocket(portNumber); 
+            String address = InetAddress.getByName("localhost").getHostAddress(); 
+            this.value = "" + address + ":" + portNumber;
+            nodeMap.put(key, value);
+        } catch (Exception e) {
+            throw new Exception("Port could not be opened: " + e);
+        }
     }
 
     public void handleIncomingMessages(int delay) throws Exception {
-	throw new Exception("Not implemented");
+        long end = System.currentTimeMillis() + delay;
+
+        while (delay == 0 || System.currentTimeMillis() < end) {
+            long remaining = end - System.currentTimeMillis();
+            if (delay != 0 && remaining <= 0) {
+                break;
+            }
+
+            socket.setSoTimeout(delay == 0 ? 0 : (int) remaining);
+
+            byte[] buf = new byte[65535];
+            DatagramPacket packet = new DatagramPacket(buf, buf.length);
+
+            try {
+                socket.receive(packet);
+                // parse + dispatch packet here
+                ByteBuffer bb = ByteBuffer.wrap(buf, 0, packet.getLength());
+                bb.order(ByteOrder.BIG_ENDIAN);
+
+                if (packet.getLength() < 4) {
+                    throw new Exception("Packet is shorter than minimum required length");
+                }
+                byte b1 = bb.get();
+                byte b2 = bb.get();
+
+                if ((b1 & 0xFF) == 0x20 || (b2 & 0xFF) == 0x20) {
+                    throw new Exception("Transaction ID cannot contain any space");
+                }
+
+                byte space = bb.get();
+                if ((b1 & 0xFF) != 0x20) {
+                    throw new Exception("Transaction ID is not followed by a space");
+                }
+
+            } catch (java.net.SocketTimeoutException e) {
+                // no packet arrived before timeout; loop will end if delay expired
+            }
+        }
     }
     
     public boolean isActive(String nodeName) throws Exception {
@@ -107,18 +201,87 @@ public class Node implements NodeInterface {
     }
 
     public boolean exists(String key) throws Exception {
-	throw new Exception("Not implemented");
+        if(nodeMap.containsKey(key)) {
+            return true;
+        }
+        return false;
     }
     
     public String read(String key) throws Exception {
 	throw new Exception("Not implemented");
     }
 
+    // FOR DATA/VALUE PAIRS
     public boolean write(String key, String value) throws Exception {
 	throw new Exception("Not implemented");
     }
 
+    // FOR DATA/VALUE PAIRS
     public boolean CAS(String key, String currentValue, String newValue) throws Exception {
 	throw new Exception("Not implemented");
+    }
+
+    public String encodeCrnString(String message) {
+        int spaceCount = 0;
+        for(int i = 0; i < message.length(); i++) {
+            if (message.charAt(i) == ' ') {
+                spaceCount++;
+            }
+        }
+
+        return "" + spaceCount + " " + message + " ";
+    }
+
+    public String decodeCrnString(String message) {
+        if (message == null) {
+            throw new IllegalArgumentException("Message is null");
+        }
+
+        int firstSpace = message.indexOf(' ');
+        if (firstSpace < 0) {
+            throw new IllegalArgumentException("Invalid CRN string: missing count separator");
+        }
+
+        int expectedInnerSpaces;
+        try {
+            expectedInnerSpaces = Integer.parseInt(message.substring(0, firstSpace));
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException("Invalid CRN string: bad space count", e);
+        }
+
+        int i = firstSpace + 1; // start of content
+        int seenInnerSpaces = 0;
+
+        while (i < message.length()) {
+            if (message.charAt(i) == ' ') {
+                if (seenInnerSpaces == expectedInnerSpaces) {
+                    // delimiter after content
+                    return message.substring(firstSpace + 1, i);
+                }
+                seenInnerSpaces++;
+            }
+            i++;
+        }
+
+        throw new IllegalArgumentException("Invalid CRN string: missing trailing delimiter");
+    }
+
+    public List<NodeInfo> getClosestNodes(Node node, HashSet<Node> knownNodes) {
+        // we are emptying the PriorityQueue to start fresh and get rid of old values.
+        while(!pq.isEmpty()) {pq.poll(); }
+        ArrayList<NodeInfo> result = new ArrayList<>();
+        
+        for(Node n : knownNodes) {
+            NodeInfo currNodeInfo = new NodeInfo(n.getNodeName(), n.getNodeValue(), HashID.getNodeDistance(node.getNodeHashedID(), n.getNodeHashedID()));
+
+            pq.add(currNodeInfo);
+            if (pq.size() > 3) {
+                pq.poll();
+            }
+        }
+
+        while(!pq.isEmpty()) {result.add(pq.poll()); }
+
+        return result;
     }
 }
