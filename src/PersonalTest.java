@@ -1,7 +1,7 @@
 class PersonalTest {
     public static void main(String[] args) throws Exception {
-        String bnryString1 = hexToBin(getHashedId("nodeName"));
-        String bnryString2 = hexToBin(getHashedId("randomName"));
-        System.out.println(getNodeDistance(bnryString1, bnryString2));
+        Node testNode = new Node();
+        testNode.openPort(12345);
+        System.err.println(testNode.getNodeValue());
     }
 }
