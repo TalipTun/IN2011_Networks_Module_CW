@@ -121,6 +121,25 @@ public class Node implements NodeInterface {
         return socket;
     }
 
+    static class RelayContext {
+        InetAddress originalAddr;
+        int originalPort;
+        byte outerTx1;
+        byte outerTx2;
+        long createdAtMs;
+
+        RelayContext(InetAddress originalAddr, int originalPort, byte outerTx1, byte outerTx2) {
+            this.originalAddr = originalAddr;
+            this.originalPort = originalPort;
+            this.outerTx1 = outerTx1;
+            this.outerTx2 = outerTx2;
+            this.createdAtMs = System.currentTimeMillis();
+        }
+    }
+
+    Map<Integer, RelayContext> relayPending = new HashMap<>();
+
+
     // A node MUST store at most three address key/value pairs for each distance.
     // If more than three exist at the same distance, the node MUST keep only three and SHOULD
     // prefer stable nodes.
@@ -182,6 +201,23 @@ public class Node implements NodeInterface {
                 }
                 byte b1 = bb.get();
                 byte b2 = bb.get();
+
+                int Tx = ((b1 & 0xFF) << 8) | (b2 & 0xFF);
+                if (relayPending.containsKey(Tx)) {
+                    RelayContext context = relayPending.get(Tx);
+
+                    byte[] copy = Arrays.copyOf(packet.getData(), packet.getLength());
+                    copy[0] = context.outerTx1;
+                    copy[1] = context.outerTx2;
+
+                    DatagramPacket relayResponse = new DatagramPacket(
+                        copy, copy.length, context.originalAddr, context.originalPort
+                    );
+                    
+                    socket.send(relayResponse);
+                    relayPending.remove(Tx);
+                    continue;
+                }
 
                 if ((b1 & 0xFF) == 0x20 || (b2 & 0xFF) == 0x20) {
                     throw new Exception("Transaction ID cannot contain any space");
@@ -250,16 +286,99 @@ public class Node implements NodeInterface {
                         socket.send(DpSend);
                         break;
                     }
-                    case 'I' : {
-                        // Used to communicate information to the user. Nodes MAY discard these messages.
-                        break;
-                    }
                     case 'V' : {
-                        // Type: V + node name + embedded message
+                        // Type: messageType + node name + embedded message
                         // A node receiving a relay MUST forward the embedded message to the named node.
                         // If the embedded message is a request, the response MUST be returned to the original sender
                         // using the relay transaction ID.
                         // Relay handling MUST NOT prevent processing of other messages.
+                        // <txid(2 bytes)> <space> V<enc(targetNodeName)><embeddedMessageBytes>
+                        String payloadIn = new String(
+                            packet.getData(),
+                            4, // txid(2) + space(1) + type(1)
+                            packet.getLength() - 4,
+                            java.nio.charset.StandardCharsets.UTF_8
+                        );
+
+                        // Parse first CRN string field (target node name) and compute nextPos
+                        int firstSpace = payloadIn.indexOf(' ');
+                        if (firstSpace < 0) break;
+
+                        int expectedInnerSpaces;
+                        try {
+                            expectedInnerSpaces = Integer.parseInt(payloadIn.substring(0, firstSpace));
+                        } catch (NumberFormatException e) {
+                            break;
+                        }
+
+                        int i = firstSpace + 1;
+                        int seenInnerSpaces = 0;
+                        int nextPos = -1;
+
+                        while (i < payloadIn.length()) {
+                            if (payloadIn.charAt(i) == ' ') {
+                                if (seenInnerSpaces == expectedInnerSpaces) {
+                                    nextPos = i + 1; // embedded message starts here
+                                    break;
+                                }
+                                seenInnerSpaces++;
+                            }
+                            i++;
+                        }
+                        if (nextPos < 0) break;
+
+                        String targetNodeName = payloadIn.substring(firstSpace + 1, nextPos - 1);
+                        System.out.println("[V] targetNodeName=" + targetNodeName);
+
+                        // Embedded message bytes (raw) starts at nextPos
+                        byte[] allPayloadBytes = payloadIn.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                        byte[] embeddedMessageBytes = java.util.Arrays.copyOfRange(
+                            allPayloadBytes, nextPos, allPayloadBytes.length
+                        );
+                        System.out.println("[V] embeddedLength=" + embeddedMessageBytes.length);
+
+                        if (embeddedMessageBytes.length < 4) throw new Exception("message length is less than 4");
+
+                        byte messageType = embeddedMessageBytes[3];
+                        char t = (char) messageType;
+                        boolean isRequest =
+                            t == 'G' || t == 'N' || t == 'E' || t == 'R' || t == 'W' || t == 'C';
+                        System.out.println("[V] embeddedType=" + t + ", isRequest=" + isRequest);
+
+                        String addr = nodeMap.get(targetNodeName);
+                        if (addr == null) {
+                            System.out.println("[V] target address not found in nodeMap");
+                            break;
+                        }
+                        String[] parts = addr.split(":");
+                        if (parts.length != 2) {
+                            System.out.println("[V] malformed target address: " + addr);
+                            break;
+                        }
+                        InetAddress targetIp = InetAddress.getByName(parts[0]);
+                        int targetPort = Integer.parseInt(parts[1]);
+                        System.out.println("[V] forwarding to " + targetIp.getHostAddress() + ":" + targetPort);
+
+                        DatagramPacket forward = new DatagramPacket(
+                            embeddedMessageBytes,
+                            embeddedMessageBytes.length,
+                            targetIp,      // resolved from target node name
+                            targetPort
+                        );
+                        socket.send(forward);
+
+                        if (isRequest) {
+                            // TODO: store mapping (inner txid -> original sender + outer txid)
+                            // so response can be returned using relay transaction ID.
+                            int innerTx = ((embeddedMessageBytes[0] & 0xFF) << 8) | (embeddedMessageBytes[1] & 0xFF);
+                            relayPending.put(innerTx, new RelayContext(packet.getAddress(), packet.getPort(), b1, b2));
+                        }
+
+                        break;
+                    }
+                    case 'I' : {
+                        // Used to communicate information to the user. Nodes MAY discard these messages.
+                        break;
                     }
                     default : {
                         System.err.println("" + type);
