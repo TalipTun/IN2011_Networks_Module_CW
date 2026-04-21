@@ -32,10 +32,47 @@ Run in VS Code
 
 You can also open `src/LocalTest.java` and run it directly from VS Code.
 
+Manual UDP Testing (Current Progress)
+-------------------------------------
+Use this to test protocol handling without relying on `LocalTest` end-to-end.
+
+1. Start the receiver node in one terminal:
+
+    javac -d out src/*.java
+    java -cp out PersonalTest
+
+`PersonalTest` opens port `12345` and calls `handleIncomingMessages(...)`.
+
+2. In a second terminal, send test packets with `nc`.
+
+Name request (`G`) test:
+
+    printf '\x01\x02 G' | nc -u -w1 127.0.0.1 12345
+
+Expected response includes `H0 N:test0` (same transaction ID, type `H`, encoded node name).
+
+Nearest request (`N`) test:
+
+    printf '\x01\x03 N0 c22e1d650c0b6ff53d9f72bc5dbeb06e07dadba6dde7ae554fe5904cad31a518 ' | nc -u -w1 127.0.0.1 12345
+
+Current expected response starts with `O`. If no known nodes are populated yet, response may contain no node pairs.
+
+Relay (`V`) test:
+
+    printf '\x01\x05 V0 N:test0 \x0A\x0B G' | nc -u -w1 127.0.0.1 12345
+
+Current debug output in `Node.handleIncomingMessages(...)` should show:
+- parsed relay target (`N:test0`)
+- embedded message length/type
+- forwarding destination
+
+3. Optional raw-byte inspection:
+
+    printf '\x01\x03 N0 c22e1d650c0b6ff53d9f72bc5dbeb06e07dadba6dde7ae554fe5904cad31a518 ' | nc -u -w1 127.0.0.1 12345 | xxd -g1
+
 
 Working Functionality
 =====================
 
 `LocalTest` currently starts but will fail with "Not implemented" until methods in
 `src/Node.java` are implemented.
-
