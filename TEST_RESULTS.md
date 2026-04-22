@@ -142,6 +142,104 @@ N/A:
 - [ ] PERF-01..PERF-03 Performance sanity
 Release Ready: NO
 
+## RUN-20260422-04
+
+Run ID: RUN-20260422-04  
+Date: 2026-04-22  
+Tester: Codex + Talip Tun  
+Branch/Commit: local workspace (uncommitted)  
+Build Command: `javac -d out src/*.java`  
+Build Result: PASS  
+Scope: Relay/sendRequest verification (direct + one-hop + two-hop + pop flow)  
+Notes:
+- Executed `/tmp/RelayHarness.java` against current `sendRequest` and `V` handling.
+- Harness creates 4 nodes in-process: `client`, `r1`, `r2`, `dest`.
+
+### Results
+
+[API-01-DIRECT] `isActive` direct path  
+Status: PASS  
+Observed:
+- Direct request/response succeeded.
+Expected:
+- `isActive(\"N:dest\")` returns true with no relays.
+Evidence:
+- Harness output: `API-01-DIRECT PASS`.
+Follow-up:
+- None.
+
+[RS-02] Relay one-hop via `r1`  
+Status: PASS  
+Observed:
+- `client -> r1 -> dest` path succeeded.
+Expected:
+- One-hop relay returns valid `H` response.
+Evidence:
+- Harness output: `RS-02 PASS`.
+Follow-up:
+- None.
+
+[RS-03] Relay two-hop via `r1,r2`  
+Status: FAIL  
+Observed:
+- `client -> r1 -> r2 -> dest` forwarding occurred, but response did not return as expected to client.
+- Harness output: `RS-03 FAIL`.
+Expected:
+- Two-hop relay returns valid `H` response to original sender.
+Evidence:
+- Harness output logs and failure summary.
+Follow-up:
+- Investigate relay response mapping for embedded `V` messages (outer relay currently treats embedded `V` as non-request).
+
+[RS-05] After pop top relay, remaining one-hop works  
+Status: PASS  
+Observed:
+- After popping `r2`, route via `r1` succeeded.
+Expected:
+- Remaining stack relay path still works.
+Evidence:
+- Harness output: `RS-05 PASS`.
+Follow-up:
+- None.
+
+[RS-04] After clearing stack, direct works  
+Status: PASS  
+Observed:
+- After popping all relays, direct request succeeded again.
+Expected:
+- Reverts to direct path.
+Evidence:
+- Harness output: `RS-04 PASS`.
+Follow-up:
+- None.
+
+## Regression Summary (RUN-20260422-04)
+
+```text
+Total tests considered: 5
+PASS: 4
+FAIL: 1
+KNOWN-FAIL: 0
+BLOCKED: 0
+N/A: 0
+```
+
+## Cases To Pass (Full Project)
+
+- [x] B-01 Build gate
+- [ ] GH-01..GH-04 Name request/response family
+- [ ] NO-01..NO-04 Nearest request/response family
+- [ ] V-01..V-08 Relay forwarding + tx rewrite + non-blocking
+- [ ] RS-01..RS-05 Relay stack routing policy
+- [ ] R-01..R-04 Retry/timeout reliability
+- [x] API-01 `isActive`
+- [ ] API-04 `read`
+- [ ] API-05 `write`
+- [ ] API-06 `CAS`
+- [ ] A-01..A-06 Robustness/adversarial suite
+- [ ] PERF-01..PERF-03 Performance sanity
+Release Ready: NO
+
 ## Open Defects
 
 Track defects found by tests:
