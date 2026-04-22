@@ -98,6 +98,7 @@ public class Node implements NodeInterface {
     PriorityQueue<NodeInfo> pq = new PriorityQueue<>(
         3, (a, b) -> Integer.compare(b.getDistance(), a.getDistance())
     );
+    Deque<String> relayStack = new ArrayDeque<>();
 
     public Node() {}
 
@@ -138,6 +139,28 @@ public class Node implements NodeInterface {
     }
 
     Map<Integer, RelayContext> relayPending = new HashMap<>();
+
+    static class ParsedCrnString {
+        String value;
+        int nextOffset;
+
+        ParsedCrnString(String value, int nextOffset) {
+            this.value = value;
+            this.nextOffset = nextOffset;
+        }
+    }
+
+    static class RoutedMessage {
+        InetAddress targetAddress;
+        int targetPort;
+        byte[] bytes;
+
+        RoutedMessage(InetAddress targetAddress, int targetPort, byte[] bytes) {
+            this.targetAddress = targetAddress;
+            this.targetPort = targetPort;
+            this.bytes = bytes;
+        }
+    }
 
 
     // A node MUST store at most three address key/value pairs for each distance.
@@ -197,7 +220,8 @@ public class Node implements NodeInterface {
                 bb.order(ByteOrder.BIG_ENDIAN);
 
                 if (packet.getLength() < 4) {
-                    throw new Exception("Packet is shorter than minimum required length");
+                    System.err.println("Ignoring malformed packet: shorter than minimum required length");
+                    continue;
                 }
                 byte b1 = bb.get();
                 byte b2 = bb.get();
@@ -220,12 +244,14 @@ public class Node implements NodeInterface {
                 }
 
                 if ((b1 & 0xFF) == 0x20 || (b2 & 0xFF) == 0x20) {
-                    throw new Exception("Transaction ID cannot contain any space");
+                    System.err.println("Ignoring malformed packet: transaction ID contains space");
+                    continue;
                 }
 
                 byte space = bb.get();
                 if ((space & 0xFF) != 0x20) {
-                    throw new Exception("Transaction ID is not followed by a space");
+                    System.err.println("Ignoring malformed packet: missing space after transaction ID");
+                    continue;
                 }
 
                 byte type = bb.get();
@@ -293,47 +319,18 @@ public class Node implements NodeInterface {
                         // using the relay transaction ID.
                         // Relay handling MUST NOT prevent processing of other messages.
                         // <txid(2 bytes)> <space> V<enc(targetNodeName)><embeddedMessageBytes>
-                        String payloadIn = new String(
-                            packet.getData(),
-                            4, // txid(2) + space(1) + type(1)
-                            packet.getLength() - 4,
-                            java.nio.charset.StandardCharsets.UTF_8
-                        );
-
-                        // Parse first CRN string field (target node name) and compute nextPos
-                        int firstSpace = payloadIn.indexOf(' ');
-                        if (firstSpace < 0) break;
-
-                        int expectedInnerSpaces;
+                        ParsedCrnString targetNodeNameEncoded;
                         try {
-                            expectedInnerSpaces = Integer.parseInt(payloadIn.substring(0, firstSpace));
-                        } catch (NumberFormatException e) {
+                            targetNodeNameEncoded = parseCrnString(packet.getData(), 4, packet.getLength());
+                        } catch (IllegalArgumentException e) {
                             break;
                         }
-
-                        int i = firstSpace + 1;
-                        int seenInnerSpaces = 0;
-                        int nextPos = -1;
-
-                        while (i < payloadIn.length()) {
-                            if (payloadIn.charAt(i) == ' ') {
-                                if (seenInnerSpaces == expectedInnerSpaces) {
-                                    nextPos = i + 1; // embedded message starts here
-                                    break;
-                                }
-                                seenInnerSpaces++;
-                            }
-                            i++;
-                        }
-                        if (nextPos < 0) break;
-
-                        String targetNodeName = payloadIn.substring(firstSpace + 1, nextPos - 1);
+                        String targetNodeName = targetNodeNameEncoded.value;
                         System.out.println("[V] targetNodeName=" + targetNodeName);
 
-                        // Embedded message bytes (raw) starts at nextPos
-                        byte[] allPayloadBytes = payloadIn.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                        // Embedded message bytes start immediately after encoded target node name.
                         byte[] embeddedMessageBytes = java.util.Arrays.copyOfRange(
-                            allPayloadBytes, nextPos, allPayloadBytes.length
+                            packet.getData(), targetNodeNameEncoded.nextOffset, packet.getLength()
                         );
                         System.out.println("[V] embeddedLength=" + embeddedMessageBytes.length);
 
@@ -368,7 +365,7 @@ public class Node implements NodeInterface {
                         socket.send(forward);
 
                         if (isRequest) {
-                            // TODO: store mapping (inner txid -> original sender + outer txid)
+                            // Store mapping (inner txid -> original sender + outer txid)
                             // so response can be returned using relay transaction ID.
                             int innerTx = ((embeddedMessageBytes[0] & 0xFF) << 8) | (embeddedMessageBytes[1] & 0xFF);
                             relayPending.put(innerTx, new RelayContext(packet.getAddress(), packet.getPort(), b1, b2));
@@ -387,20 +384,182 @@ public class Node implements NodeInterface {
 
             } catch (java.net.SocketTimeoutException e) {
                 // no packet arrived before timeout; loop will end if delay expired
+            } catch (Exception e) {
+                // Malformed/unsupported packets must not crash the receiver loop.
+                System.err.println("Ignoring malformed packet: " + e.getMessage());
             }
         }
     }
+
+    // Build one shared sendRequest(...) helper:
+    // Takes messageType + payload + target node.
+    // Applies relay wrapping from the stack (V chain) exactly like isActive.
+    // Handles timeout/retry rules (up to 3 sends, 5s timeout).
+
+    public byte[] sendRequest(byte type, byte[] payload, String target, byte expRespType) throws Exception {
+        if(target == null) {
+            throw new Exception("nodename does not exist");
+        }
+
+        byte[] outerTx = generateTransactionId();
+        byte[] request = new byte[4 + payload.length];
+
+        request[0] = outerTx[0];
+        request[1] = outerTx[1];
+        request[2] = 0x20;
+        request[3] = type;
+        
+        for(int i = 0; i < payload.length; i++) {
+            request[i + 4] = payload[i];
+        }
+
+        String addr = nodeMap.get(target);
+
+        if (addr == null) {
+            throw new Exception("address is null");
+        }
+
+        if (addr.indexOf(":") == -1) {
+            throw new Exception("port does not exist");
+        }
+
+        String[] ipPort = addr.split(":");
+
+        if (ipPort.length != 2) throw new Exception("ip or port missing");
+
+        InetAddress requestIp = InetAddress.getByName(ipPort[0]);
+        int requestPort = Integer.parseInt(ipPort[1]);;
+
+        if (requestIp == null || requestPort <= 0) {
+            throw new Exception("ip or port does not exist");
+        }
+
+        DatagramPacket requestDgPacket = new DatagramPacket(
+            request,
+            request.length,
+            requestIp,
+            requestPort
+        );
+
+        for (int attempt = 0; attempt < 3; attempt++) {
+            //send it through relays is there are any:
+            // arraylist has elements such as N:r1
+            byte[] embedded = new byte[] {outerTx[0], outerTx[1], 0x20, (byte) 'G'};
+            String nextHopName = target;
+            ArrayList<String> relays = new ArrayList<>(relayStack);
+            for (int i = relays.size() - 1; i >= 0; i--) {
+                String relayName = relays.get(i);
+                boolean isOutermostRelay = (i == 0);
+
+                byte tx1;
+                byte tx2;
+                if (isOutermostRelay) {
+                    tx1 = outerTx[0];
+                    tx2 = outerTx[1];
+                } else {
+                    byte[] relayTx = generateTransactionId();
+                    tx1 = relayTx[0];
+                    tx2 = relayTx[1];
+                }
+
+                byte[] targetField = encodeCrnString(nextHopName).getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                byte[] wrapped = new byte[4 + targetField.length + embedded.length];
+                wrapped[0] = tx1;
+                wrapped[1] = tx2;
+                wrapped[2] = 0x20;
+                wrapped[3] = (byte) 'V';
+                System.arraycopy(targetField, 0, wrapped, 4, targetField.length);
+                System.arraycopy(embedded, 0, wrapped, 4 + targetField.length, embedded.length);
+
+                embedded = wrapped;
+                nextHopName = relayName;
+            }
+
+            socket.send(requestDgPacket);
+
+            long deadline = System.currentTimeMillis() + 5000L;
+            while (System.currentTimeMillis() < deadline) {
+                int remaining = (int) (deadline - System.currentTimeMillis());
+                if (remaining <= 0) {
+                    break;
+                }
+
+                socket.setSoTimeout(remaining);
+                byte[] recvBuf = new byte[65535];
+                DatagramPacket response = new DatagramPacket(recvBuf, recvBuf.length);
+
+                try {
+                    socket.receive(response);
+                } catch (java.net.SocketTimeoutException e) {
+                    break;
+                }
+
+                if (response.getLength() < 4) {
+                    continue;
+                }
+
+                byte[] data = response.getData();
+                if (data[0] != outerTx[0] || data[1] != outerTx[1]) {
+                    continue;
+                }
+
+                if ((data[2] & 0xFF) != 0x20) {
+                    continue;
+                }
+
+                // to be changed later on to make it dynamic
+                char responseType = (char) data[3];
+
+                if (responseType != (char) expRespType) {
+                    continue;
+                }
+
+                return Arrays.copyOfRange(data, 0, response.getLength());
+            }
+        }
+
+        return null;
+    }
+
     
     public boolean isActive(String nodeName) throws Exception {
-	throw new Exception("Not implemented");
+        if (nodeName == null || nodeName.isEmpty() || !nodeName.startsWith("N:")) {
+            throw new Exception("Node name must be a non-empty CRN node name (N:...)");
+        }
+
+        byte[] isActivePayload = new byte[0];
+        byte[] response = sendRequest((byte) 'G', isActivePayload, nodeName, (byte) 'H');
+
+        if (response == null) {
+            return false;
+        }   
+
+        String responsePayload = new String(
+            response,
+            4,
+            response.length - 4,
+            java.nio.charset.StandardCharsets.UTF_8
+        );
+
+        return nodeName.equals(decodeCrnString(responsePayload));
     }
+
     
     public void pushRelay(String nodeName) throws Exception {
-	throw new Exception("Not implemented");
+        if (nodeName == null || nodeName.isEmpty()) {
+            throw new Exception("Relay node name cannot be null or empty");
+        }
+        if (!nodeName.startsWith("N:")) {
+            throw new Exception("Relay node name must start with 'N:'");
+        }
+
+        relayStack.addLast(nodeName);
     }
 
     public void popRelay() throws Exception {
-        throw new Exception("Not implemented");
+        if (!relayStack.isEmpty()) {
+            relayStack.removeLast();
+        }
     }
 
     public boolean exists(String key) throws Exception {
@@ -467,6 +626,130 @@ public class Node implements NodeInterface {
         }
 
         throw new IllegalArgumentException("Invalid CRN string: missing trailing delimiter");
+    }
+
+    private ParsedCrnString parseCrnString(byte[] data, int offset, int limitExclusive) {
+        if (offset < 0 || offset >= limitExclusive) {
+            throw new IllegalArgumentException("Invalid CRN string start");
+        }
+
+        int firstSpace = -1;
+        for (int i = offset; i < limitExclusive; i++) {
+            if ((data[i] & 0xFF) == 0x20) {
+                firstSpace = i;
+                break;
+            }
+        }
+        if (firstSpace < 0) {
+            throw new IllegalArgumentException("Invalid CRN string: missing count separator");
+        }
+
+        int expectedInnerSpaces;
+        try {
+            String countText = new String(
+                data,
+                offset,
+                firstSpace - offset,
+                java.nio.charset.StandardCharsets.US_ASCII
+            );
+            expectedInnerSpaces = Integer.parseInt(countText);
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException("Invalid CRN string: bad space count");
+        }
+
+        int contentStart = firstSpace + 1;
+        int seenInnerSpaces = 0;
+        for (int i = contentStart; i < limitExclusive; i++) {
+            if ((data[i] & 0xFF) == 0x20) {
+                if (seenInnerSpaces == expectedInnerSpaces) {
+                    String value = new String(
+                        data,
+                        contentStart,
+                        i - contentStart,
+                        java.nio.charset.StandardCharsets.UTF_8
+                    );
+                    return new ParsedCrnString(value, i + 1);
+                }
+                seenInnerSpaces++;
+            }
+        }
+
+        throw new IllegalArgumentException("Invalid CRN string: missing trailing delimiter");
+    }
+
+    private byte[] generateTransactionId() {
+        Random random = new Random();
+        byte b1;
+        byte b2;
+        do {
+            b1 = (byte) random.nextInt(256);
+        } while ((b1 & 0xFF) == 0x20);
+        do {
+            b2 = (byte) random.nextInt(256);
+        } while ((b2 & 0xFF) == 0x20);
+        return new byte[] {b1, b2};
+    }
+
+    private RoutedMessage buildNameRequest(String targetNodeName, byte outerTx1, byte outerTx2) throws Exception {
+        if (!nodeMap.containsKey(targetNodeName)) {
+            throw new Exception("Unknown target node: " + targetNodeName);
+        }
+
+        if (relayStack.isEmpty()) {
+            String address = nodeMap.get(targetNodeName);
+            String[] addressParts = address.split(":");
+            InetAddress ip = InetAddress.getByName(addressParts[0]);
+            int port = Integer.parseInt(addressParts[1]);
+
+            byte[] direct = new byte[] {outerTx1, outerTx2, 0x20, (byte) 'G'};
+            return new RoutedMessage(ip, port, direct);
+        }
+
+        byte[] embeddedTx = generateTransactionId();
+        byte[] embedded = new byte[] {embeddedTx[0], embeddedTx[1], 0x20, (byte) 'G'};
+        String nextHopName = targetNodeName;
+
+        ArrayList<String> relays = new ArrayList<>(relayStack);
+        for (int i = relays.size() - 1; i >= 0; i--) {
+            String relayName = relays.get(i);
+            boolean isOutermostRelay = (i == 0);
+
+            byte tx1;
+            byte tx2;
+            if (isOutermostRelay) {
+                tx1 = outerTx1;
+                tx2 = outerTx2;
+            } else {
+                byte[] relayTx = generateTransactionId();
+                tx1 = relayTx[0];
+                tx2 = relayTx[1];
+            }
+
+            byte[] targetField = encodeCrnString(nextHopName).getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            byte[] wrapped = new byte[4 + targetField.length + embedded.length];
+            wrapped[0] = tx1;
+            wrapped[1] = tx2;
+            wrapped[2] = 0x20;
+            wrapped[3] = (byte) 'V';
+            System.arraycopy(targetField, 0, wrapped, 4, targetField.length);
+            System.arraycopy(embedded, 0, wrapped, 4 + targetField.length, embedded.length);
+
+            embedded = wrapped;
+            nextHopName = relayName;
+        }
+
+        String firstRelayAddr = nodeMap.get(nextHopName);
+        if (firstRelayAddr == null) {
+            throw new Exception("Unknown relay node in stack: " + nextHopName);
+        }
+        String[] addressParts = firstRelayAddr.split(":");
+        if (addressParts.length != 2) {
+            throw new Exception("Malformed relay address for node: " + nextHopName);
+        }
+        InetAddress relayIp = InetAddress.getByName(addressParts[0]);
+        int relayPort = Integer.parseInt(addressParts[1]);
+
+        return new RoutedMessage(relayIp, relayPort, embedded);
     }
 
     public List<NodeInfo> getClosestNodes(String targetHashId, HashSet<Node> knownNodes) {
