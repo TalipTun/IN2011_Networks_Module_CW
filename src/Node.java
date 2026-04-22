@@ -162,6 +162,7 @@ public class Node implements NodeInterface {
         }
     }
 
+    HashMap<String, String> dataStore = new HashMap<>();
 
     // A node MUST store at most three address key/value pairs for each distance.
     // If more than three exist at the same distance, the node MUST keep only three and SHOULD
@@ -339,7 +340,7 @@ public class Node implements NodeInterface {
                         byte messageType = embeddedMessageBytes[3];
                         char t = (char) messageType;
                         boolean isRequest =
-                            t == 'G' || t == 'N' || t == 'E' || t == 'R' || t == 'W' || t == 'C';
+                            t == 'G' || t == 'N' || t == 'E' || t == 'R' || t == 'W' || t == 'C' || t == 'V';
                         System.out.println("[V] embeddedType=" + t + ", isRequest=" + isRequest);
 
                         String addr = nodeMap.get(targetNodeName);
@@ -428,7 +429,7 @@ public class Node implements NodeInterface {
         if (ipPort.length != 2) throw new Exception("ip or port missing");
 
         InetAddress requestIp = InetAddress.getByName(ipPort[0]);
-        int requestPort = Integer.parseInt(ipPort[1]);;
+        int requestPort = Integer.parseInt(ipPort[1]);
 
         if (requestIp == null || requestPort <= 0) {
             throw new Exception("ip or port does not exist");
@@ -444,7 +445,7 @@ public class Node implements NodeInterface {
         for (int attempt = 0; attempt < 3; attempt++) {
             //send it through relays is there are any:
             // arraylist has elements such as N:r1
-            byte[] embedded = new byte[] {outerTx[0], outerTx[1], 0x20, (byte) 'G'};
+            byte[] embedded = Arrays.copyOf(request, request.length);
             String nextHopName = target;
             ArrayList<String> relays = new ArrayList<>(relayStack);
             for (int i = relays.size() - 1; i >= 0; i--) {
@@ -471,11 +472,40 @@ public class Node implements NodeInterface {
                 System.arraycopy(targetField, 0, wrapped, 4, targetField.length);
                 System.arraycopy(embedded, 0, wrapped, 4 + targetField.length, embedded.length);
 
+                String relayAddr = nodeMap.get(relayName);
+
+                if (relayAddr == null) {
+                    throw new Exception("address is null");
+                }
+
+                if (relayAddr.indexOf(":") == -1) {
+                    throw new Exception("port does not exist");
+                }
+
+                String[] relayIpPort = relayAddr.split(":");
+
+                if (relayIpPort.length != 2) throw new Exception("ip or port missing");
+
+                if(isOutermostRelay) {
+                    requestIp = InetAddress.getByName(relayIpPort[0]);
+                    requestPort = Integer.parseInt(relayIpPort[1]);
+                }
+
                 embedded = wrapped;
                 nextHopName = relayName;
             }
 
-            socket.send(requestDgPacket);
+            if(!relays.isEmpty()) {
+                DatagramPacket relayDgPacket = new DatagramPacket(
+                    embedded,
+                    embedded.length,
+                    requestIp,
+                    requestPort
+                );
+                socket.send(relayDgPacket);
+            } else {
+                socket.send(requestDgPacket);
+            }
 
             long deadline = System.currentTimeMillis() + 5000L;
             while (System.currentTimeMillis() < deadline) {
@@ -570,7 +600,46 @@ public class Node implements NodeInterface {
     }
     
     public String read(String key) throws Exception {
-	throw new Exception("Not implemented");
+        if(key == null) {
+            return null;
+        }
+
+        if(!key.startsWith("D:"))
+        throw new Exception("Key is not data");
+
+        if (dataStore.containsKey(key)) {
+            return dataStore.get(key);
+        }
+
+        byte requestType = 'R';
+        byte expectedReadHitType = 'S';
+        String encodedKey = encodeCrnString(key);
+        byte[] encodedKeyBytes = encodedKey.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+
+        List<NodeInfo> closestNodesList = getClosestNodes(HashID.getHashedId(key), knownNodes);
+        if (closestNodesList.isEmpty()) {
+            return null;
+        }
+
+        for (NodeInfo node : closestNodesList) {
+            String target = node.getName();
+
+            byte[] response = sendRequest(requestType, encodedKeyBytes, target, expectedReadHitType);
+            if (response == null) {
+                continue; // try next closest node
+            }
+
+            try {
+                String responsePayload = new String(
+                    response, 4, response.length - 4, java.nio.charset.StandardCharsets.UTF_8
+                );
+                return decodeCrnString(responsePayload); // first successful hit
+            } catch (Exception e) {
+                // malformed/unexpected response from this node; try next one
+            }
+        }
+
+        return null;
     }
 
     // FOR DATA/VALUE PAIRS
