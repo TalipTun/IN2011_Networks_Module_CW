@@ -189,7 +189,7 @@ public class Node implements NodeInterface {
             socket = new DatagramSocket(portNumber); 
             String address = InetAddress.getByName("localhost").getHostAddress(); 
             this.value = "" + address + ":" + portNumber;
-            nodeMap.put(key, value);
+            applyAddressStoragePolicy(key, value);
         } catch (Exception e) {
             throw new Exception("Port could not be opened: " + e);
         }
@@ -386,53 +386,149 @@ public class Node implements NodeInterface {
                             java.nio.charset.StandardCharsets.UTF_8
                         );
 
-                        String requestedKey = decodeCrnString(payloadIn);
-                        String stored = dataStore.get(requestedKey);
-
-                        if (stored == null) {
+                        String requestedKey;
+                        try {
+                            requestedKey = decodeCrnString(payloadIn);
+                        } catch (IllegalArgumentException e) {
                             break;
                         }
 
-                        byte caseType;
-                        byte[] response;
-                        if (requestedKey != null) { 
-                            caseType = (byte)'S';
-                            response = encodeCrnString(stored).getBytes(java.nio.charset.StandardCharsets.UTF_8);
-                            byte[] responsePayload = new byte[4 + response.length];
+                        boolean a = localHasKey(requestedKey);
+                        boolean b = isOneOfThreeClosest(requestedKey);
 
+                        byte[] responsePayload;
+                        if (a && requestedKey.startsWith("D:")) {
+                            String stored = dataStore.get(requestedKey);
+                            byte[] valueBytes = encodeCrnString(stored).getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                            responsePayload = new byte[5 + valueBytes.length];
                             responsePayload[0] = b1;
                             responsePayload[1] = b2;
                             responsePayload[2] = 0x20;
-                            responsePayload[3] = type;
-                            System.arraycopy(response, 0, responsePayload, 4, response.length);
+                            responsePayload[3] = (byte) 'S';
+                            responsePayload[4] = (byte) 'Y';
+                            System.arraycopy(valueBytes, 0, responsePayload, 5, valueBytes.length);
+                        } else {
+                            byte code = b ? (byte) 'N' : (byte) 'X';
+                            responsePayload = new byte[] { b1, b2, 0x20, (byte) 'S', code };
+                        }
 
-                            DatagramPacket currPacket = new DatagramPacket(responsePayload, responsePayload.length, packet.getAddress(), packet.getPort());
-                            socket.send(currPacket);
+                        DatagramPacket currPacket = new DatagramPacket(
+                            responsePayload,
+                            responsePayload.length,
+                            packet.getAddress(),
+                            packet.getPort()
+                        );
+                        socket.send(currPacket);
+                        break;
+                    }
+                    case 'E' : {
+                        String payloadIn = new String(
+                            packet.getData(),
+                            4,
+                            packet.getLength() - 4,
+                            java.nio.charset.StandardCharsets.UTF_8
+                        );
+                        String requestedKey;
+                        try {
+                            requestedKey = decodeCrnString(payloadIn);
+                        } catch (IllegalArgumentException e) {
                             break;
                         }
+
+                        boolean a = localHasKey(requestedKey);
+                        boolean b = isOneOfThreeClosest(requestedKey);
+                        byte code = a ? (byte) 'Y' : (b ? (byte) 'N' : (byte) 'X');
+                        byte[] resp = new byte[] { b1, b2, 0x20, (byte) 'F', code };
+                        DatagramPacket reply = new DatagramPacket(resp, resp.length, packet.getAddress(), packet.getPort());
+                        socket.send(reply);
+                        break;
                     }
                     case 'W': {
-                        ParsedCrnString k = parseCrnString(packet.getData(), 4, packet.getLength());
-                        ParsedCrnString v = parseCrnString(packet.getData(), k.nextOffset, packet.getLength());
+                        ParsedCrnString k;
+                        ParsedCrnString v;
+                        try {
+                            k = parseCrnString(packet.getData(), 4, packet.getLength());
+                            v = parseCrnString(packet.getData(), k.nextOffset, packet.getLength());
+                        } catch (IllegalArgumentException e) {
+                            break;
+                        }
 
                         String writeKey = k.value;
                         String writeValue = v.value;
 
+                        byte code;
                         if (writeKey.startsWith("D:")) {
-                            dataStore.put(writeKey, writeValue);
+                            boolean a = dataStore.containsKey(writeKey);
+                            boolean b = isOneOfThreeClosest(writeKey);
+                            if (a) {
+                                dataStore.put(writeKey, writeValue);
+                                code = (byte) 'R';
+                            } else if (b && !hasThreeStrictlyCloserNodes(writeKey)) {
+                                dataStore.put(writeKey, writeValue);
+                                code = (byte) 'A';
+                            } else {
+                                code = (byte) 'X';
+                            }
                         } else if (writeKey.startsWith("N:")) {
-                            nodeMap.put(writeKey, writeValue);
+                            code = applyAddressStoragePolicy(writeKey, writeValue);
                         } else {
                             break;
                         }
 
-                        byte[] ack = new byte[] { b1, b2, 0x20, (byte) 'X' };
+                        byte[] ack = new byte[] { b1, b2, 0x20, (byte) 'X', code };
                         DatagramPacket reply = new DatagramPacket(ack, ack.length, packet.getAddress(), packet.getPort());
                         socket.send(reply);
                         break;
                     }
                     case 'C' : {
+                        ParsedCrnString key;
+                        ParsedCrnString value;
+                        ParsedCrnString newValue;
+                        try {
+                            key = parseCrnString(packet.getData(), 4, packet.getLength());
+                            value = parseCrnString(packet.getData(), key.nextOffset, packet.getLength());
+                            newValue = parseCrnString(packet.getData(), value.nextOffset, packet.getLength());
+                        } catch (IllegalArgumentException e) {
+                            break;
+                        }
 
+                        String cKey = key.value;
+                        String cValue = value.value;
+                        String cNewValue = newValue.value;
+
+                        if(!cKey.startsWith("D:")){
+                            break;
+                        }
+
+                        String keyHash = HashID.getHashedId(cKey);
+                        HashSet<Node> candidateNodes = new HashSet<>(knownNodes);
+                        candidateNodes.add(this);
+                        List<NodeInfo> closestNodes = getClosestNodes(keyHash, candidateNodes);
+                        boolean isClosestNode = false;
+                        for (NodeInfo curNodeInfo : closestNodes) {
+                            if (this.getNodeName() != null && this.getNodeName().equals(curNodeInfo.getName())) {
+                                isClosestNode = true;
+                                break;
+                            }
+                        }
+
+                        String stored = dataStore.get(cKey);
+                        byte[] cPayload = new byte[]{b1, b2, 0x20, (byte) 'R'};
+
+                        if(stored != null && stored.equals(cValue)) {
+                            dataStore.put(cKey, cNewValue);
+                        } else if (stored != null && !stored.equals(cValue)) {
+                            cPayload[3] = (byte) 'N';
+                        } else if (stored == null && isClosestNode) {
+                            cPayload[3] = (byte) 'A';
+                        } else {
+                            cPayload[3] = (byte) 'X';
+                        }
+
+                        DatagramPacket cResponse = new DatagramPacket(cPayload, cPayload.length, packet.getSocketAddress());
+                        socket.send(cResponse);
+
+                        break;
                     }
                     default : {
                         System.err.println("" + type);
@@ -454,8 +550,17 @@ public class Node implements NodeInterface {
     // Handles timeout/retry rules (up to 3 sends, 5s timeout).
 
     public byte[] sendRequest(byte type, byte[] payload, String target, byte expRespType) throws Exception {
+        Set<Byte> expectedRespTypes = new HashSet<>();
+        expectedRespTypes.add(expRespType);
+        return sendRequest(type, payload, target, expectedRespTypes);
+    }
+
+    public byte[] sendRequest(byte type, byte[] payload, String target, Set<Byte> expectedRespTypes) throws Exception {
         if(target == null) {
             throw new Exception("nodename does not exist");
+        }
+        if (expectedRespTypes == null || expectedRespTypes.isEmpty()) {
+            throw new Exception("expected response type set is empty");
         }
 
         byte[] outerTx = generateTransactionId();
@@ -593,10 +698,8 @@ public class Node implements NodeInterface {
                     continue;
                 }
 
-                // to be changed later on to make it dynamic
-                char responseType = (char) data[3];
-
-                if (responseType != (char) expRespType) {
+                byte responseType = data[3];
+                if (!expectedRespTypes.contains(responseType)) {
                     continue;
                 }
 
@@ -604,6 +707,10 @@ public class Node implements NodeInterface {
             }
         }
 
+        if (target != null && target.startsWith("N:")) {
+            nodeMap.remove(target);
+            removeKnownNodeByName(target);
+        }
         return null;
     }
 
@@ -649,9 +756,40 @@ public class Node implements NodeInterface {
     }
 
     public boolean exists(String key) throws Exception {
-        if(nodeMap.containsKey(key)) {
+        if (key == null) {
+            return false;
+        }
+
+        if (localHasKey(key)) {
             return true;
         }
+
+        String encodedKey = encodeCrnString(key);
+        byte[] payload = encodedKey.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        Set<Byte> expectedTypes = new HashSet<>();
+        expectedTypes.add((byte) 'F');
+
+        List<NodeInfo> closestNodesList = getClosestNodes(HashID.getHashedId(key), knownNodes);
+        if (closestNodesList.isEmpty()) {
+            return false;
+        }
+
+        for (NodeInfo node : closestNodesList) {
+            try {
+                byte[] response = sendRequest((byte) 'E', payload, node.getName(), expectedTypes);
+                if (response == null || response.length < 5) {
+                    continue;
+                }
+
+                byte code = response[4];
+                if (code == (byte) 'Y') {
+                    return true;
+                }
+            } catch (Exception e) {
+                // try next closest node
+            }
+        }
+
         return false;
     }
     
@@ -686,10 +824,26 @@ public class Node implements NodeInterface {
             }
 
             try {
+                if (response.length < 5) {
+                    continue;
+                }
+
+                byte code = response[4];
+                if (code == (byte) 'Y') {
+                    String responsePayload = new String(
+                        response, 5, response.length - 5, java.nio.charset.StandardCharsets.UTF_8
+                    );
+                    return decodeCrnString(responsePayload);
+                }
+                if (code == (byte) 'N' || code == (byte) 'X' || code == (byte) '?') {
+                    continue;
+                }
+
+                // Backward-compatibility: some nodes may return only encoded value after S
                 String responsePayload = new String(
                     response, 4, response.length - 4, java.nio.charset.StandardCharsets.UTF_8
                 );
-                return decodeCrnString(responsePayload); // first successful hit
+                return decodeCrnString(responsePayload);
             } catch (Exception e) {
                 // malformed/unexpected response from this node; try next one
             }
@@ -721,7 +875,16 @@ public class Node implements NodeInterface {
             try {
                 byte[] response = sendRequest((byte) 'W', payload, target, (byte) 'X');
                 if (response != null) {
-                    return true;
+                    if (response.length < 5) {
+                        continue;
+                    }
+                    byte code = response[4];
+                    if (code == (byte) 'R' || code == (byte) 'A') {
+                        return true;
+                    }
+                    if (code == (byte) 'X') {
+                        continue;
+                    }
                 }
             } catch (Exception e) {
                 // try next closest node
@@ -733,7 +896,208 @@ public class Node implements NodeInterface {
 
     // FOR DATA/VALUE PAIRS
     public boolean CAS(String key, String currentValue, String newValue) throws Exception {
-	throw new Exception("Not implemented");
+	    if(key == null || currentValue == null || newValue == null || !key.startsWith("D:")) {
+            return false;
+        }
+
+        String encodedKey = encodeCrnString(key);
+        String encodedCurrVal = encodeCrnString(currentValue);
+        String encodedNewVal = encodeCrnString(newValue);
+        String responseString = encodedKey + encodedCurrVal + encodedNewVal;
+        byte[] payload = responseString.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+
+        List<NodeInfo> closestNodesList = getClosestNodes(HashID.getHashedId(key), knownNodes);
+        Set<Byte> expectedRespTypes = new HashSet<>(Arrays.asList(
+            (byte) 'R', (byte) 'N', (byte) 'A', (byte) 'X'
+        ));
+
+        if (closestNodesList.isEmpty()) {
+            return false;
+        }
+
+        for (NodeInfo node : closestNodesList) {
+            String target = node.getName();
+
+            byte[] response = sendRequest((byte) 'C', payload, target, expectedRespTypes);
+            if (response == null) {
+                continue; // try next closest node
+            }
+
+            if (response.length >= 4) {
+                byte responseType = response[3];
+                if (responseType == (byte) 'R') {
+                    return true;
+                }
+                if (responseType == (byte) 'N' || responseType == (byte) 'A' || responseType == (byte) 'X') {
+                    return false;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private boolean localHasKey(String key) {
+        if (key == null) {
+            return false;
+        }
+        if (key.startsWith("D:")) {
+            return dataStore.containsKey(key);
+        }
+        if (key.startsWith("N:")) {
+            String v = nodeMap.get(key);
+            return v != null && !v.isEmpty();
+        }
+        return false;
+    }
+
+    private void removeKnownNodeByName(String nodeName) {
+        if (nodeName == null) {
+            return;
+        }
+        Iterator<Node> it = knownNodes.iterator();
+        while (it.hasNext()) {
+            Node n = it.next();
+            if (n != null && nodeName.equals(n.getNodeName())) {
+                it.remove();
+            }
+        }
+    }
+
+    private boolean isValidAddressValue(String address) {
+        if (address == null || address.isEmpty() || address.indexOf(":") == -1) {
+            return false;
+        }
+        String[] parts = address.split(":");
+        if (parts.length != 2 || parts[0].isEmpty()) {
+            return false;
+        }
+        try {
+            int p = Integer.parseInt(parts[1]);
+            return p > 0 && p <= 65535;
+        } catch (NumberFormatException e) {
+            return false;
+        }
+    }
+
+    private int distanceToNode(String nodeName) throws Exception {
+        String selfHash = this.getNodeHashedID();
+        if (selfHash == null) {
+            selfHash = HashID.getHashedId(this.getNodeName());
+            this.hashedID = selfHash;
+        }
+        String otherHash = HashID.getHashedId(nodeName);
+        return HashID.getNodeDistance(selfHash, otherHash);
+    }
+
+    private byte applyAddressStoragePolicy(String nodeName, String address) throws Exception {
+        if (nodeName == null || !nodeName.startsWith("N:") || !isValidAddressValue(address)) {
+            return (byte) 'X';
+        }
+
+        String existing = nodeMap.get(nodeName);
+        boolean hadExisting = existing != null && !existing.isEmpty();
+        if (hadExisting || nodeName.equals(this.getNodeName())) {
+            nodeMap.put(nodeName, address);
+            return hadExisting ? (byte) 'R' : (byte) 'A';
+        }
+
+        int targetDist = distanceToNode(nodeName);
+        int sameDistanceCount = 0;
+        for (Map.Entry<String, String> entry : nodeMap.entrySet()) {
+            String k = entry.getKey();
+            String v = entry.getValue();
+            if (k == null || !k.startsWith("N:") || k.equals(nodeName) || !isValidAddressValue(v)) {
+                continue;
+            }
+            int d;
+            try {
+                d = distanceToNode(k);
+            } catch (Exception e) {
+                continue;
+            }
+            if (d == targetDist) {
+                sameDistanceCount++;
+            }
+        }
+
+        if (sameDistanceCount >= 3) {
+            // Keep existing entries (treat them as more stable by default).
+            return (byte) 'X';
+        }
+
+        nodeMap.put(nodeName, address);
+        return (byte) 'A';
+    }
+
+    private boolean hasThreeStrictlyCloserNodes(String dataKey) throws Exception {
+        if (dataKey == null || !dataKey.startsWith("D:") || this.getNodeName() == null) {
+            return false;
+        }
+        String keyHash = HashID.getHashedId(dataKey);
+        int selfDistance = HashID.getNodeDistance(keyHash, HashID.getHashedId(this.getNodeName()));
+        int count = 0;
+
+        HashSet<String> seen = new HashSet<>();
+        for (Node n : knownNodes) {
+            if (n == null || n.getNodeName() == null) {
+                continue;
+            }
+            String nn = n.getNodeName();
+            if (nn.equals(this.getNodeName()) || seen.contains(nn)) {
+                continue;
+            }
+            seen.add(nn);
+            int d = HashID.getNodeDistance(keyHash, HashID.getHashedId(nn));
+            if (d < selfDistance) {
+                count++;
+                if (count >= 3) {
+                    return true;
+                }
+            }
+        }
+
+        for (Map.Entry<String, String> entry : nodeMap.entrySet()) {
+            String nn = entry.getKey();
+            String addr = entry.getValue();
+            if (nn == null || !nn.startsWith("N:") || nn.equals(this.getNodeName()) || seen.contains(nn)) {
+                continue;
+            }
+            if (!isValidAddressValue(addr)) {
+                continue;
+            }
+            seen.add(nn);
+            int d;
+            try {
+                d = HashID.getNodeDistance(keyHash, HashID.getHashedId(nn));
+            } catch (Exception e) {
+                continue;
+            }
+            if (d < selfDistance) {
+                count++;
+                if (count >= 3) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private boolean isOneOfThreeClosest(String targetKey) throws Exception {
+        if (this.getNodeName() == null || targetKey == null) {
+            return false;
+        }
+        String keyHash = HashID.getHashedId(targetKey);
+        HashSet<Node> candidateNodes = new HashSet<>(knownNodes);
+        candidateNodes.add(this);
+        List<NodeInfo> closestNodes = getClosestNodes(keyHash, candidateNodes);
+        for (NodeInfo node : closestNodes) {
+            if (this.getNodeName().equals(node.getName())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     public String encodeCrnString(String message) {
@@ -909,10 +1273,42 @@ public class Node implements NodeInterface {
         // we are emptying the PriorityQueue to start fresh and get rid of old values.
         while(!pq.isEmpty()) {pq.poll(); }
         ArrayList<NodeInfo> result = new ArrayList<>();
+        HashSet<String> seenNames = new HashSet<>();
         
         for(Node n : knownNodes) {
             NodeInfo currNodeInfo = new NodeInfo(n.getNodeName(), n.getNodeValue(), HashID.getNodeDistance(targetHashId, n.getNodeHashedID()));
 
+            pq.add(currNodeInfo);
+            seenNames.add(n.getNodeName());
+            if (pq.size() > 3) {
+                pq.poll();
+            }
+        }
+
+        for (Map.Entry<String, String> entry : nodeMap.entrySet()) {
+            String nodeName = entry.getKey();
+            String address = entry.getValue();
+            if (nodeName == null || !nodeName.startsWith("N:")) {
+                continue;
+            }
+            if (address == null || address.isEmpty() || address.indexOf(":") == -1) {
+                continue;
+            }
+            if (seenNames.contains(nodeName)) {
+                continue;
+            }
+
+            String nodeHash;
+            try {
+                nodeHash = HashID.getHashedId(nodeName);
+            } catch (Exception e) {
+                continue;
+            }
+            NodeInfo currNodeInfo = new NodeInfo(
+                nodeName,
+                address,
+                HashID.getNodeDistance(targetHashId, nodeHash)
+            );
             pq.add(currNodeInfo);
             if (pq.size() > 3) {
                 pq.poll();
