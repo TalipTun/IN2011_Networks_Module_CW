@@ -378,6 +378,62 @@ public class Node implements NodeInterface {
                         // Used to communicate information to the user. Nodes MAY discard these messages.
                         break;
                     }
+                    case 'R' : {
+                        String payloadIn = new String(
+                            packet.getData(),
+                            4,                              // txid(2) + space(1) + type(1)
+                            packet.getLength() - 4,
+                            java.nio.charset.StandardCharsets.UTF_8
+                        );
+
+                        String requestedKey = decodeCrnString(payloadIn);
+                        String stored = dataStore.get(requestedKey);
+
+                        if (stored == null) {
+                            break;
+                        }
+
+                        byte caseType;
+                        byte[] response;
+                        if (requestedKey != null) { 
+                            caseType = (byte)'S';
+                            response = encodeCrnString(stored).getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                            byte[] responsePayload = new byte[4 + response.length];
+
+                            responsePayload[0] = b1;
+                            responsePayload[1] = b2;
+                            responsePayload[2] = 0x20;
+                            responsePayload[3] = type;
+                            System.arraycopy(response, 0, responsePayload, 4, response.length);
+
+                            DatagramPacket currPacket = new DatagramPacket(responsePayload, responsePayload.length, packet.getAddress(), packet.getPort());
+                            socket.send(currPacket);
+                            break;
+                        }
+                    }
+                    case 'W': {
+                        ParsedCrnString k = parseCrnString(packet.getData(), 4, packet.getLength());
+                        ParsedCrnString v = parseCrnString(packet.getData(), k.nextOffset, packet.getLength());
+
+                        String writeKey = k.value;
+                        String writeValue = v.value;
+
+                        if (writeKey.startsWith("D:")) {
+                            dataStore.put(writeKey, writeValue);
+                        } else if (writeKey.startsWith("N:")) {
+                            nodeMap.put(writeKey, writeValue);
+                        } else {
+                            break;
+                        }
+
+                        byte[] ack = new byte[] { b1, b2, 0x20, (byte) 'X' };
+                        DatagramPacket reply = new DatagramPacket(ack, ack.length, packet.getAddress(), packet.getPort());
+                        socket.send(reply);
+                        break;
+                    }
+                    case 'C' : {
+
+                    }
                     default : {
                         System.err.println("" + type);
                     }
@@ -644,7 +700,35 @@ public class Node implements NodeInterface {
 
     // FOR DATA/VALUE PAIRS
     public boolean write(String key, String value) throws Exception {
-	throw new Exception("Not implemented");
+        if (key == null || value == null || !key.startsWith("D:")) {
+            return false;
+        }
+
+        String encKey = encodeCrnString(key);
+        String encVal = encodeCrnString(value);
+        byte[] payload = (encKey + encVal).getBytes(java.nio.charset.StandardCharsets.UTF_8);
+
+        List<NodeInfo> closestNodesList = getClosestNodes(HashID.getHashedId(key), knownNodes);
+
+        if (closestNodesList.isEmpty()) {
+            dataStore.put(key, value);
+            return true;
+        }
+
+        for (NodeInfo node : closestNodesList) {
+            String target = node.getName();
+
+            try {
+                byte[] response = sendRequest((byte) 'W', payload, target, (byte) 'X');
+                if (response != null) {
+                    return true;
+                }
+            } catch (Exception e) {
+                // try next closest node
+            }
+        }
+
+        return false;
     }
 
     // FOR DATA/VALUE PAIRS
