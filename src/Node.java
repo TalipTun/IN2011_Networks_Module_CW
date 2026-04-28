@@ -228,7 +228,7 @@ public class Node implements NodeInterface {
                 byte b2 = bb.get();
 
                 int Tx = ((b1 & 0xFF) << 8) | (b2 & 0xFF);
-                if (relayPending.containsKey(Tx)) {
+                if (relayPending.containsKey(Tx) && !isRequestType(packet.getData()[3])) {
                     RelayContext context = relayPending.get(Tx);
 
                     byte[] copy = Arrays.copyOf(packet.getData(), packet.getLength());
@@ -339,8 +339,7 @@ public class Node implements NodeInterface {
 
                         byte messageType = embeddedMessageBytes[3];
                         char t = (char) messageType;
-                        boolean isRequest =
-                            t == 'G' || t == 'N' || t == 'E' || t == 'R' || t == 'W' || t == 'C' || t == 'V';
+                        boolean isRequest = isRequestType(messageType);
                         System.out.println("[V] embeddedType=" + t + ", isRequest=" + isRequest);
 
                         String addr = nodeMap.get(targetNodeName);
@@ -949,6 +948,11 @@ public class Node implements NodeInterface {
             return v != null && !v.isEmpty();
         }
         return false;
+    }
+
+    private boolean isRequestType(byte type) {
+        char t = (char) type;
+        return t == 'G' || t == 'N' || t == 'E' || t == 'R' || t == 'W' || t == 'C' || t == 'V';
     }
 
     private void removeKnownNodeByName(String nodeName) {
