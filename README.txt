@@ -74,5 +74,16 @@ Current debug output in `Node.handleIncomingMessages(...)` should show:
 Working Functionality
 =====================
 
-`LocalTest` currently starts but will fail with "Not implemented" until methods in
-`src/Node.java` are implemented.
+- `LocalTest` runs successfully for supported node counts (2 to 10).
+- Core protocol families are implemented and tested: `G/H`, `N/O`, relay `V`, `E/F`, `R/S`, `W/X`, and `C`.
+- Reliability behavior (retry/timeout and unrelated packet filtering) is implemented and verified.
+- Malformed packet handling is resilient (receiver loop continues after invalid input).
+
+One-Command Capture Demo
+========================
+
+To compile, run `PersonalTest`, capture UDP traffic, send a packet, and stop capture automatically:
+
+    ./scripts/run_capture_demo.sh
+
+This creates a timestamped `.pcap` in the project root and prints the file path for inspection with `tcpdump` or Wireshark.
